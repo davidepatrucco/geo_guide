@@ -1,0 +1,216 @@
+openapi: 3.1.0
+info:
+  title: GeoGuide API
+  version: "1.0.0"
+  description: >
+    API per guida geolocalizzata multilingua (LangGraph + MongoDB).
+    Nota: la collection `narrations_cache` è persistente con **TTL configurabile** (default 24h).
+servers:
+  - url: https://api.geoguide.example.com/v1
+tags:
+  - name: Auth
+  - name: POI
+  - name: Narrations
+  - name: Contributions
+  - name: Config
+  - name: Logs
+  - name: Health
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login OIDC PKCE
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                code_verifier: { type: string }
+              required: [code, code_verifier]
+      responses:
+        '200':
+          description: JWT + user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Logout
+      responses:
+        '204': { description: OK }
+  /poi/nearby:
+    get:
+      tags: [POI]
+      summary: Trova POI vicini
+      parameters:
+        - in: query
+          name: lat
+          schema: { type: number }
+          required: true
+        - in: query
+          name: lon
+          schema: { type: number }
+          required: true
+        - in: query
+          name: radius
+          schema: { type: integer, default: 120 }
+      responses:
+        '200':
+          description: Lista POI
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Poi' }
+  /narration:
+    post:
+      tags: [Narrations]
+      summary: Genera o recupera narrazione
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                poi_id: { type: string }
+                lang: { type: string }
+                style: { type: string, enum: [guide, quick, kids, anecdotes] }
+              required: [poi_id, lang, style]
+      responses:
+        '200':
+          description: Narrazione
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Narration' }
+    get:
+      tags: [Narrations]
+      summary: Recupera narrazione da cache
+      parameters:
+        - in: query
+          name: poi_id
+          schema: { type: string }
+          required: true
+        - in: query
+          name: lang
+          schema: { type: string }
+          required: true
+        - in: query
+          name: style
+          schema: { type: string }
+          required: true
+      responses:
+        '200':
+          description: Narrazione
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Narration' }
+  /contrib:
+    post:
+      tags: [Contributions]
+      summary: Invia contributo
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserContribution' }
+      responses:
+        '201': { description: Creato }
+    get:
+      tags: [Contributions]
+      summary: Lista contributi utente
+      responses:
+        '200':
+          description: Lista
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/UserContribution' }
+  /config:
+    get:
+      tags: [Config]
+      summary: Config pubblica app
+      responses:
+        '200':
+          description: Config
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppConfig' }
+  /log:
+    post:
+      tags: [Logs]
+      summary: Registra evento uso
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UsageLog' }
+      responses:
+        '204': { description: OK }
+  /health:
+    get:
+      tags: [Health]
+      summary: Healthcheck
+      responses:
+        '200': { description: OK }
+  /metrics:
+    get:
+      tags: [Health]
+      summary: Metriche Prometheus
+      responses:
+        '200': { description: Metriche }
+components:
+  schemas:
+    Poi:
+      type: object
+      properties:
+        _id: { type: string }
+        name: { type: object, additionalProperties: { type: string } }
+        location:
+          type: object
+          properties:
+            type: { type: string }
+            coordinates:
+              type: array
+              items: { type: number }
+        langs: { type: array, items: { type: string } }
+    Narration:
+      type: object
+      properties:
+        poi_id: { type: string }
+        style: { type: string }
+        lang: { type: string }
+        text: { type: string }
+        audio_url: { type: string }
+        sources:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              url: { type: string }
+        confidence: { type: number }
+        created_at: { type: string, format: date-time }
+    UserContribution:
+      type: object
+      properties:
+        poi_id: { type: string }
+        lang: { type: string }
+        text: { type: string }
+        status: { type: string }
+    AppConfig:
+      type: object
+      properties:
+        version: { type: integer }
+        flags: { type: object }
+        limits: { type: object }
+    UsageLog:
+      type: object
+      properties:
+        event: { type: string }
+        ts: { type: string, format: date-time }
+        user_hash: { type: string }
+        session_id: { type: string }
+        poi_id: { type: string }

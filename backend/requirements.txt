@@ -1,0 +1,17 @@
+python-dotenv==1.0.1
+fastapi==0.111.0
+uvicorn[standard]==0.30.3
+mangum==0.17.0
+pydantic-settings==2.3.4
+python-dotenv==1.0.1
+pymongo[srv]==4.7.2
+httpx==0.27.2
+python-jose[cryptography]==3.3.0
+prometheus-client==0.20.0
+pytest
+pytest-asyncio
+certifi==2024.8.30
+boto3==1.35.23          # se usiamo AWS SDK
+requests==2.32.3        # chiamate HTTP extra
+loguru==0.7.2           # logging avanzato
+email-validator==2.1.1

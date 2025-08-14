@@ -1,0 +1,35 @@
+service: geoguide-api
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.11
+  region: eu-central-1
+  stage: ${opt:stage, env:STAGE, 'staging'}
+  architecture: arm64
+  memorySize: 1024
+  timeout: 15
+  environment:
+    STAGE: ${self:provider.stage}
+    MONGO_URI: ${env:MONGO_URI}
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY}
+
+functions:
+  api:
+    name: geoguide-api-${self:provider.stage}
+    handler: backend/src/app.handler    # FastAPI + Mangum
+    events:
+      - httpApi: '*'
+
+package:
+  patterns:
+    - backend/**/*
+    - '!**/__pycache__/**'
+
+plugins:
+  - serverless-python-requirements
+
+custom:
+  pythonRequirements:
+    slim: true
+    layer: true
