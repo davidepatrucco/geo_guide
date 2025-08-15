@@ -15,3 +15,4 @@ boto3==1.35.23          # se usiamo AWS SDK
 requests==2.32.3        # chiamate HTTP extra
 loguru==0.7.2           # logging avanzato
 email-validator==2.1.1
+reverse_geocoder

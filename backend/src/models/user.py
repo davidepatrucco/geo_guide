@@ -1,8 +1,11 @@
-from datetime import datetime
-from pymongo import ReturnDocument
-from ..infra.db import get_db
+from ..infra.db import users
+from pymongo import ASCENDING
 
 COLLECTION = "users"
+
+def ensure_indexes():
+    users.create_index([("sub", ASCENDING)], name="uq_sub", unique=True, sparse=True)   # OIDC subject
+    users.create_index([("email", ASCENDING)], name="uq_email", unique=True, sparse=True)
 
 def upsert_from_claims(claims: dict):
     """

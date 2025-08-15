@@ -12,6 +12,26 @@ from .controllers.config_controller import router as config_router
 from .controllers.log_controller import router as log_router
 from .controllers.metrics_controller import router as metrics_router
 
+# ====== DEBUG POI_DOCS ROUTE ======
+from fastapi import APIRouter
+from bson import ObjectId
+from .infra.db import poi_docs
+
+debug_router = APIRouter()
+
+@debug_router.get("/debug/poi_docs/{poi_id}")
+async def debug_poi_docs(poi_id: str):
+    oid = ObjectId(poi_id)
+    docs = list(poi_docs.find({"poi_id": oid}, {"_id": 0}))
+    return {"count": len(docs), "docs": docs}
+# ==================================
+
+import logging
+
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("services.narration_service").setLevel(logging.DEBUG)
+logging.getLogger("controllers.poi_controller").setLevel(logging.DEBUG)
+
 app = FastAPI(title="GeoGuide API", version="1.0.0")
 
 app.add_middleware(
@@ -37,6 +57,6 @@ app.include_router(contrib_router,   prefix="/v1")
 app.include_router(config_router,    prefix="/v1")
 app.include_router(log_router,       prefix="/v1")
 app.include_router(metrics_router,   prefix="/v1")
+app.include_router(debug_router,     prefix="/v1")  # <== aggiunto qui
 
-# AWS Lambda handler
 handler = Mangum(app)
