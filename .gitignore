@@ -1,1 +1,4 @@
 backend/.geo
+.env
+.env.prod
+.env.staging
