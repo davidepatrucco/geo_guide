@@ -129,7 +129,12 @@ async def enrich_poi_list(pois_list: list[dict], lang: str = "en", write_to_db: 
 
         # Scarica contenuto se abbiamo titolo
         if wiki_title:
-            final_title, _, extract_full = await _query_extracts(poi_lang, wiki_title)
+            final_title, _, extract_full, query_lang = await _query_extracts(poi_lang, wiki_title)
+            logger.debug(
+                f"[enrich_poi_list] Lang check for POI {p['_id']}: "
+                f"requested_lang={poi_lang}, query_lang={query_lang}, "
+                f"title={wiki_title}, content_len={len(extract_full) if extract_full else 0}"
+            )
             if extract_full:
                 wiki_title = final_title or wiki_title
                 wiki_content = extract_full
@@ -138,7 +143,7 @@ async def enrich_poi_list(pois_list: list[dict], lang: str = "en", write_to_db: 
             else:
                 logger.warning(f"[enrich_poi_list] No content returned for '{wiki_title}' (POI {p.get('_id')})")
 
-        # Aggiungi al risultato
+        # Aggiungi al risultato (anche per risposta API)
         results.append({
             "_id": p["_id"],
             "poi_lang": poi_lang,
@@ -158,6 +163,8 @@ async def enrich_poi_list(pois_list: list[dict], lang: str = "en", write_to_db: 
             logger.debug(f"[enrich_poi_list] Added POI update for {p['_id']}")
 
             if wiki_content and wiki_url and wiki_content.strip():
+                logger.debug(f"[enrich_poi_list] Preparing poi_docs UPSERT for {p['_id']} lang={poi_lang} "
+                             f"len={len(wiki_content)} url={wiki_url}")
                 bulk_docs.append(UpdateOne(
                     {"poi_id": ObjectId(p["_id"]), "lang": poi_lang},
                     {
@@ -173,20 +180,23 @@ async def enrich_poi_list(pois_list: list[dict], lang: str = "en", write_to_db: 
                     },
                     upsert=True
                 ))
-                logger.debug(f"[enrich_poi_list] Added poi_docs upsert for {p['_id']} ({len(wiki_content)} chars)")
 
     if write_to_db:
         if bulk_pois:
+            logger.info(f"[enrich_poi_list] BULK_POIS size={len(bulk_pois)}")
             res_pois = pois.bulk_write(bulk_pois)
             logger.info(f"[enrich_poi_list] pois.bulk_write result: {res_pois.bulk_api_result}")
         else:
             logger.debug("[enrich_poi_list] No POI updates to write")
 
         if bulk_docs:
+            logger.info(f"[enrich_poi_list] BULK_DOCS size={len(bulk_docs)}")
+            for op in bulk_docs:
+                logger.debug(f"[enrich_poi_list] BULK_DOC filter={op._filter} update={op._doc}")
             res_docs = poi_docs.bulk_write(bulk_docs)
             logger.info(f"[enrich_poi_list] poi_docs.bulk_write result: {res_docs.bulk_api_result}")
         else:
-            logger.debug("[enrich_poi_list] No poi_docs upserts to write")
+            logger.warning("[enrich_poi_list] No poi_docs upserts to write")
 
     logger.info(f"[enrich_poi_list] END: processed {len(pois_list)} POIs")
     return results

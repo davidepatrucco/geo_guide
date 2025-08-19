@@ -9,3 +9,4 @@ usage_logs       = db["usage_logs"]
 users            = db["users"]
 app_config       = db["app_config"] 
 enrich_cache     = db["nearby_enrich_cache"]  # TTL cache anti-enrich ripetuto
+searched_pois    = db["searched_pois"]

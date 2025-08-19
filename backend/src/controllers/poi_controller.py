@@ -1,169 +1,169 @@
-# backend/src/controllers/poi_controller.py
-from fastapi import APIRouter, HTTPException, Body, Query
-from fastapi.responses import JSONResponse
-from datetime import datetime, timezone
-from bson import ObjectId, errors as bson_errors
+from fastapi import APIRouter, Body
+from datetime import datetime, timedelta
 import logging
+from bson import ObjectId
+from difflib import SequenceMatcher
 
-from ..models import poi as poi_model
-from ..models import poi_doc as poi_doc_model
-from ..services.osm_service import fetch_nearby_osm
-from ..infra.db import pois
-from ..services.wiki_service import fetch_and_store_wiki, find_wikipedia_title
-from ..services.poi_enrichment import enrich_poi_list
-import asyncio
+from ..infra.db import pois, poi_docs, searched_pois
+from ..services.osm_service import fetch_osm_pois
+from ..services.wiki_service import fetch_wiki_docs
+import reverse_geocoder as rg
 
+router = APIRouter()
 
-# Setup logger
-logger = logging.getLogger("poi_controller")
-logger.setLevel(logging.DEBUG)
+SEARCH_TTL_DAYS = 5
+COORD_PRECISION = 6
+POI_RADIUS_METERS = 200
 
-router = APIRouter(prefix="/poi", tags=["poi"])
+def serialize_doc(doc):
+    """Converte ObjectId in stringhe per la serializzazione JSON."""
+    if "_id" in doc and isinstance(doc["_id"], ObjectId):
+        doc["_id"] = str(doc["_id"])
+    if "poi_id" in doc and isinstance(doc["poi_id"], ObjectId):
+        doc["poi_id"] = str(doc["poi_id"])
+    return doc
 
+def get_lang_from_coords(lat, lon):
+    result = rg.search((lat, lon))[0]
+    country_code = result['cc']
+    country_lang_map = {
+        "IT": "it",
+        "FR": "fr",
+        "DE": "de",
+        "US": "en",
+    }
+    return country_lang_map.get(country_code, "en")
 
-def _shortid(objid):
-    """Helper to shorten ObjectId for logging."""
-    return str(objid)[-6:]
+def round_coord(lat, lon):
+    return (round(lat, COORD_PRECISION), round(lon, COORD_PRECISION))
 
-@router.get("/{poi_id}")
-def get_poi(poi_id: str):
-    doc = poi_model.get(poi_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Not found")
-    out = {**doc, "_id": str(doc["_id"])}
-    for k in ("created_at", "updated_at", "last_refresh_at"):
-        if out.get(k) and hasattr(out[k], "isoformat"):
-            out[k] = out[k].isoformat()
-    return out
-
-@router.post("/{poi_id}/hydrate")
-async def hydrate_poi(poi_id: str, prefer_lang: str = Query("it")):
-    try:
-        _ = ObjectId(poi_id)
-    except bson_errors.InvalidId:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid_poi_id"})
-
-    p = poi_model.get(poi_id)
-    logger.debug("[hydrate_poi] Loaded POI %s: %s", poi_id, p)
-    if not p:
-        return JSONResponse(status_code=404, content={"ok": False, "error": "not_found"})
-
-    wp = p.get("wikipedia") or {}
-    if not wp:
-        return {"ok": False, "error": "no_wikipedia_link"}
-
-    try:
-        ok = await fetch_and_store_wiki(p, prefer_lang=prefer_lang)
-        return {"ok": bool(ok)}
-    except Exception as e:
-        return JSONResponse(status_code=502, content={"ok": False, "error": "wiki_fetch_failed", "detail": str(e)[:200]})
-
-@router.get("/{poi_id}/docs")
-def get_poi_docs(poi_id: str, lang: str | None = None, limit: int = 5):
-    try:
-        _ = ObjectId(poi_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid poi_id")
-    items = poi_doc_model.list_by_poi(poi_id, lang=lang, limit=limit)
-    return {"items": items}
-
+def is_relevant_name(name1: str, name2: str, threshold: float = 0.85) -> bool:
+    """Verifica se due nomi sono molto simili."""
+    if not name1 or not name2:
+        return False
+    n1, n2 = name1.lower().strip(), name2.lower().strip()
+    if n1 == n2:
+        return True
+    return SequenceMatcher(None, n1, n2).ratio() >= threshold
 
 @router.post("/nearby")
-async def nearby_poi(
-    payload: dict = Body(...),
-    enrich: bool = Query(default=False),
-    max_inserts: int = Query(default=50)
-):
-    import time
-    t0 = time.time()
+async def get_nearby_pois(payload: dict = Body(...)):
+    lat = payload["lat"]
+    lon = payload["lon"]
+    radius_m = payload.get("radius", POI_RADIUS_METERS)
+    enrich = payload.get("enrich", False)
 
-    lat = payload.get("lat")
-    lon = payload.get("lon")
-    radius_m = payload.get("radius_m", 50)
-    lang = (payload.get("lang") or "it").lower()
+    req_lang = get_lang_from_coords(lat, lon)
+    logging.info(f"[NEARBY] Request for lat={lat}, lon={lon}, enrich={enrich}, lang={req_lang}")
 
-    if lat is None or lon is None:
-        raise HTTPException(status_code=400, detail="lat/lon required")
+    now = datetime.utcnow()
+    lat_r, lon_r = round_coord(lat, lon)
 
-    logger.debug(f"[nearby_poi] Fetching OSM data lat={lat}, lon={lon}, radius={radius_m}")
-    pois_list = await fetch_nearby_osm(lat, lon, radius_m)
-    logger.debug(f"[nearby_poi] OSM fetched {len(pois_list)} items in {time.time()-t0:.2f}s")
-
-    inserted = updated = 0
-    now = datetime.now(timezone.utc)
-
-    # Garantiamo _id a tutti i POI e inseriamo in DB se nuovi
-    for p in pois_list[:max_inserts]:
-        if "_id" not in p or not p["_id"]:
-            p["_id"] = ObjectId()
-
-        if "osm" in p and "id" in p["osm"]:
-            p["osm"]["id"] = str(p["osm"]["id"])
-        if not p.get("wikidata_qid"):
-            p.pop("wikidata_qid", None)
-        if not p.get("langs"):
-            p["langs"] = [lang]
-        if "last_refresh_at" not in p:
-            p["last_refresh_at"] = now
-        
-        res = pois.update_one(
-            {"_id": p["_id"]},
-            {"$setOnInsert": {**p, "created_at": now}},
-            upsert=True
-        )
-        if res.upserted_id:
-            inserted += 1
-        elif res.modified_count:
-            updated += 1
-
-    logger.debug(f"[nearby_poi] Inserted={inserted}, Updated={updated} in {time.time()-t0:.2f}s")
-
-    if enrich:
-        t_enrich = time.time()
-        enriched_results = await enrich_poi_list(pois_list[:max_inserts], lang, write_to_db=False)
-
-        # Aggiorna in background il DB
-        asyncio.create_task(enrich_poi_list(enriched_results, lang, write_to_db=True))
-
-        # Usa i risultati arricchiti per la risposta
-        pois_list[:max_inserts] = enriched_results
-        logger.debug(f"[nearby_poi] Enrichment done in {time.time()-t_enrich:.2f}s")
-
-
-        # Restituisco lista arricchita subito
-        return {
-            "attempted": True,
-            "fetched": len(pois_list),
-            "inserted": inserted,
-            "updated": updated,
-            "elapsed_sec": round(time.time()-t0, 2),
-            "items": [
-                {
-                    "poi_id": str(p["_id"]),
-                    "name": p.get("name"),
-                    "wiki_title": p.get("wiki_title"),
-                    "wiki_content": p.get("wiki_content"),
-                    "distance_m": p.get("distance_m")
+    # Cache hit
+    search_entry = searched_pois.find_one({"lat": lat_r, "lon": lon_r})
+    if search_entry and search_entry["last_search_at"] >= now - timedelta(days=SEARCH_TTL_DAYS):
+        pois_list = [serialize_doc(p) for p in pois.find({
+            "location": {
+                "$near": {
+                    "$geometry": {"type": "Point", "coordinates": [lon, lat]},
+                    "$maxDistance": radius_m
                 }
-                for p in enriched_results
-            ]
-        }
+            },
+            "is_active": True
+        })]
+        poi_ids = [ObjectId(p["_id"]) for p in pois_list]
+        docs_list = [serialize_doc(d) for d in poi_docs.find({"poi_id": {"$in": poi_ids}})]
+        return {"source": "cache", "pois": pois_list, "docs": docs_list}
 
-    # Caso enrich=False → come prima
-    return {
-        "attempted": True,
-        "fetched": len(pois_list),
-        "inserted": inserted,
-        "updated": updated,
-        "elapsed_sec": round(time.time()-t0, 2),
-        "items": [
-            {
-                "poi_id": str(p["_id"]),
-                "name": p.get("name"),
-                "wiki_title": p.get("wiki_title"),
-                "distance_m": p.get("distance_m")
-            }
-            for p in pois_list[:max_inserts]
-        ]
-    }
+    # Step 1: Fetch OSM
+    osm_pois = await fetch_osm_pois(lat, lon, radius_m)
 
+    found_ids = []
+    seen_names = []
+
+    for osm_poi in osm_pois:
+        name = osm_poi.get("name", "").strip()
+        if not name or len(name) < 3:
+            continue
+        if any(is_relevant_name(name, seen) for seen in seen_names):
+            logging.debug(f"[NEARBY] Skipping duplicate/similar POI name '{name}'")
+            continue
+        seen_names.append(name)
+
+        lat_r_poi, lon_r_poi = round_coord(osm_poi["lat"], osm_poi["lon"])
+        existing = pois.find_one({
+            "lat_round": lat_r_poi,
+            "lon_round": lon_r_poi,
+            "provider": "osm",
+            "provider_id": osm_poi.get("id")
+        })
+
+        if existing:
+            pois.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"last_seen_at": now, "is_active": True}}
+            )
+            poi_id = existing["_id"]
+        else:
+            poi_id = pois.insert_one({
+                "lat_round": lat_r_poi,
+                "lon_round": lon_r_poi,
+                "provider": "osm",
+                "provider_id": osm_poi.get("id"),
+                "name": {"default": name},
+                "aliases": [],
+                "location": {
+                    "type": "Point",
+                    "coordinates": [osm_poi["lon"], osm_poi["lat"]]
+                },
+                "langs": [req_lang],
+                "photos": [],
+                "last_seen_at": now,
+                "is_active": True,
+                "created_at": now,
+                "updated_at": now
+            }).inserted_id
+        found_ids.append(poi_id)
+
+    # Disattiva POI fuori raggio
+    pois.update_many(
+        {
+            "location": {
+                "$geoWithin": {
+                    "$centerSphere": [[lon, lat], radius_m / 6378137]
+                }
+            },
+            "_id": {"$nin": found_ids}
+        },
+        {"$set": {"is_active": False}}
+    )
+
+    # Step 2: Enrichment Wikipedia
+    if enrich:
+        for poi_id in found_ids:
+            poi = pois.find_one({"_id": poi_id})
+            docs = await fetch_wiki_docs(poi)
+            for doc in docs:
+                if isinstance(doc.get("poi_id"), str):
+                    doc["poi_id"] = ObjectId(doc["poi_id"])
+                poi_docs.update_one(
+                    {
+                        "poi_id": poi_id,
+                        "lang": doc["lang"],
+                        "source": "wikipedia",
+                        "url": doc["url"]
+                    },
+                    {"$set": {**doc, "updated_at": now}},
+                    upsert=True
+                )
+
+    searched_pois.update_one(
+        {"lat_round": lat_r, "lon_round": lon_r},
+        {"$set": {"lat_round": lat_r, "lon_round": lon_r, "last_search_at": now}},
+        upsert=True
+    )
+
+    pois_list = [serialize_doc(p) for p in pois.find({"_id": {"$in": found_ids}})]
+    docs_list = [serialize_doc(d) for d in poi_docs.find({"poi_id": {"$in": found_ids}})]
+
+    return {"source": "fresh", "pois": pois_list, "docs": docs_list}
