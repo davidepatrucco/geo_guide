@@ -1,4 +1,11 @@
 backend/.geo
 .env
 .env.prod
+.env.staging.env
+.env.prod
 .env.staging
+.env
+env.prod
+env.staging
+.env.*
+env.*
